@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Arch Linux Post-Install Script
+# RTX 5060 (Blackwell) + KDE Plasma + Wayland
 # =============================================================================
 
 set -euo pipefail
@@ -23,14 +24,23 @@ add_failed_service() { FAILED_SERVICES+=("$1"); warning "Servis başlatılamadı
 
 # --- Root kontrolü ---
 if [[ $EUID -eq 0 ]]; then
-    error "Bu scripti root olarak çalıştırma. sudo gereken yerlerde zaten kullanılıyor."
+    error "Bu scripti doğrudan root olarak çalıştırma. Gerekli yerlerde sudo kullanılıyor."
     exit 1
 fi
 
-# sudo ile çalıştırılınca SUDO_USER gerçek kullanıcıyı verir
 CURRENT_USER="${SUDO_USER:-$USER}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 info "Kullanıcı: $CURRENT_USER"
+info "Script dizini: $SCRIPT_DIR"
+
+# --- Gerekli dosyaları kontrol et ---
+for f in "$SCRIPT_DIR/arch-linux.zsh-theme" "$SCRIPT_DIR/.zshrc"; do
+    if [[ ! -f "$f" ]]; then
+        error "Gerekli dosya bulunamadı: $f"
+        exit 1
+    fi
+done
+success "Gerekli dosyalar mevcut."
 
 # =============================================================================
 # 1. SİSTEM GÜNCELLEMESİ & TEMEL PAKETLER
@@ -39,26 +49,42 @@ info "Sistem güncelleniyor ve temel paketler kuruluyor..."
 sudo pacman -Syu --noconfirm firefox plasma-meta base-devel git
 
 # =============================================================================
-# 2. KERNEL DEĞİŞİKLİĞİ: LTS → STANDART + NVIDIA
+# 2. KERNEL: LTS → STANDART (open kernel zaten archinstall ile kuruldu)
 # =============================================================================
-info "LTS kernel kaldırılıyor, standart kernel ve nvidia kuruluyor..."
-sudo pacman -Rns --noconfirm linux-lts linux-lts-headers nvidia-open-dkms 2>/dev/null || \
-    warning "LTS kernel zaten kaldırılmış olabilir, devam ediliyor."
-sudo pacman -S --noconfirm linux linux-headers nvidia-open nvidia-utils
+info "LTS kernel kaldırılıyor (varsa)..."
+sudo pacman -Rns --noconfirm linux-lts linux-lts-headers 2>/dev/null || \
+    warning "LTS kernel zaten kaldırılmış, devam ediliyor."
+
+info "Standart kernel ve başlıklar güncelleniyor..."
+sudo pacman -S --noconfirm --needed linux linux-headers
 
 # =============================================================================
-# 3. NVIDIA AYARLARI
+# 3. NVIDIA KURULUMU (RTX 5060 / Blackwell — sadece nvidia-open desteklenir)
 # =============================================================================
+info "Mevcut nvidia-open-dkms kaldırılıyor (varsa)..."
+sudo pacman -Rns --noconfirm nvidia-open-dkms 2>/dev/null || true
+
+info "nvidia-open ve nvidia-utils kuruluyor..."
+sudo pacman -S --noconfirm --needed nvidia-open nvidia-utils lib32-nvidia-utils
+
+# --- 3a. Modprobe ayarları ---
 info "Nvidia modprobe ayarları yapılıyor..."
 sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
+# RTX 5060 (Blackwell) için gerekli ayarlar
 options nvidia_drm modeset=1 fbdev=1
 options nvidia NVreg_EnableGpuFirmware=1
+
+# Nouveau'yu kapat (çakışmayı önler)
+blacklist nouveau
+options nouveau modeset=0
 EOF
 
+# --- 3b. mkinitcpio modülleri ---
 info "Nvidia modülleri mkinitcpio.conf'a ekleniyor..."
 sudo sed -i 's/^MODULES=.*/MODULES=(nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' /etc/mkinitcpio.conf
 
-info "UKI kernel cmdline'a nvidia parametreleri ekleniyor..."
+# --- 3c. UKI / kernel cmdline ---
+info "Kernel cmdline nvidia parametreleri kontrol ediliyor..."
 if [[ -f /etc/kernel/cmdline ]]; then
     if ! grep -q "nvidia-drm.modeset=1" /etc/kernel/cmdline; then
         sudo sed -i 's/$/ nvidia-drm.modeset=1 nvidia-drm.fbdev=1/' /etc/kernel/cmdline
@@ -67,8 +93,21 @@ if [[ -f /etc/kernel/cmdline ]]; then
         warning "nvidia-drm parametreleri zaten mevcut, atlanıyor."
     fi
 else
-    warning "/etc/kernel/cmdline bulunamadı."
+    warning "/etc/kernel/cmdline bulunamadı (UKI kullanılmıyor olabilir, GRUB kullanıcıları için normal)."
 fi
+
+# --- 3d. SDDM + Wayland siyah ekran koruması (RTX 5060 bilinen sorun) ---
+# Kaynak: Arch/Manjaro forumlarında RTX 5060 + SDDM/Wayland siyah ekran raporları
+info "SDDM Wayland ayarları yapılıyor (RTX 5060 uyumluluk)..."
+sudo mkdir -p /etc/sddm.conf.d
+sudo tee /etc/sddm.conf.d/nvidia-wayland.conf > /dev/null << 'EOF'
+[General]
+# RTX 5060 (Blackwell) ile SDDM/Wayland siyah ekran sorununu önler
+# Sorun çözülürse bu dosya silinebilir
+DisplayServer=x11
+EOF
+warning "SDDM geçici olarak X11 modunda başlatılıyor (RTX 5060 SDDM/Wayland uyumluluk sorunu)."
+warning "Nvidia driver güncellemelerini takip et: https://bbs.archlinux.org/viewtopic.php?id=307259"
 
 # =============================================================================
 # 4. NVIDIA PACMAN HOOK — kernel/nvidia senkronizasyonu
@@ -91,7 +130,7 @@ When=PostTransaction
 Depends=mkinitcpio
 Exec=/usr/bin/mkinitcpio -P
 EOF
-success "Nvidia hook oluşturuldu. Kernel/nvidia güncellemelerinde mkinitcpio otomatik çalışacak."
+success "Nvidia hook oluşturuldu."
 
 info "mkinitcpio yeniden oluşturuluyor..."
 sudo mkinitcpio -P
@@ -101,19 +140,24 @@ sudo mkinitcpio -P
 # =============================================================================
 if ! command -v paru &>/dev/null; then
     info "Paru kuruluyor..."
-    mkdir -p ~/Downloads
-    cd ~/Downloads/
-    git clone https://aur.archlinux.org/paru.git
-    cd paru
-    makepkg -si --noconfirm
-    cd ~
+    PARU_BUILD_DIR="/home/$CURRENT_USER/Downloads/paru-build"
+    sudo -u "$CURRENT_USER" mkdir -p "$PARU_BUILD_DIR"
+    sudo -u "$CURRENT_USER" git clone https://aur.archlinux.org/paru.git "$PARU_BUILD_DIR"
+    sudo -u "$CURRENT_USER" bash -c "cd '$PARU_BUILD_DIR' && makepkg -si --noconfirm"
+    rm -rf "$PARU_BUILD_DIR"
     success "Paru kuruldu."
 else
     warning "Paru zaten kurulu, atlanıyor."
 fi
 
 # =============================================================================
-# 6. AUR PAKETLERİ (1. GRUP)
+# 6. SNAPPER (btrfs snapshot — kurulum öncesinde kuralım)
+# =============================================================================
+info "Snapper ve snap-pac kuruluyor..."
+sudo pacman -S --noconfirm --needed snapper snap-pac
+
+# =============================================================================
+# 7. AUR PAKETLERİ (1. GRUP)
 # =============================================================================
 info "AUR paketleri kuruluyor (1. grup)..."
 paru -S --noconfirm \
@@ -127,10 +171,10 @@ paru -S --noconfirm \
     lmstudio-bin
 
 # =============================================================================
-# 7. PACMAN PAKETLERİ
+# 8. PACMAN PAKETLERİ
 # =============================================================================
 info "Pacman paketleri kuruluyor..."
-sudo pacman -Syu --noconfirm \
+sudo pacman -S --noconfirm --needed \
     torbrowser-launcher \
     onionshare \
     mullvad-vpn \
@@ -140,7 +184,7 @@ sudo pacman -Syu --noconfirm \
     clamav \
     clamtk
 
-sudo pacman -S --noconfirm \
+sudo pacman -S --noconfirm --needed \
     wget curl sof-firmware flatpak \
     bash-completion btop wireshark-qt \
     fuse2 isoimagewriter \
@@ -159,10 +203,18 @@ sudo pacman -S --noconfirm \
     btrfs-assistant zsh \
     noise-suppression-for-voice \
     apparmor audit rkhunter \
-    reflector downgrade
+    reflector downgrade \
+    firewalld
 
 # =============================================================================
-# 8. REFLECTOR — En hızlı mirror listesi
+# 9. FLATPAK — Flathub eklentisi
+# =============================================================================
+info "Flatpak Flathub deposu ekleniyor..."
+flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+success "Flathub eklendi."
+
+# =============================================================================
+# 10. REFLECTOR — En hızlı mirror listesi
 # =============================================================================
 info "Reflector ayarlanıyor..."
 sudo tee /etc/xdg/reflector/reflector.conf > /dev/null << 'EOF'
@@ -176,10 +228,10 @@ sudo systemctl enable --now reflector.timer
 success "Reflector timer etkinleştirildi."
 
 # =============================================================================
-# 9. VİRTUALİZASYON
+# 11. VİRTUALİZASYON
 # =============================================================================
 info "Virtualizasyon paketleri kuruluyor..."
-sudo pacman -S --noconfirm \
+sudo pacman -S --noconfirm --needed \
     virt-manager qemu-full vde2 dnsmasq \
     dmidecode libvirt edk2-ovmf openbsd-netcat
 
@@ -189,7 +241,7 @@ sudo usermod -aG kvm "$CURRENT_USER"
 success "Kullanıcı libvirt ve kvm grubuna eklendi."
 
 # =============================================================================
-# 10. AUR PAKETLERİ (2. GRUP)
+# 12. AUR PAKETLERİ (2. GRUP)
 # =============================================================================
 info "AUR paketleri kuruluyor (2. grup)..."
 paru -S --noconfirm \
@@ -200,56 +252,86 @@ paru -S --noconfirm \
     winboat-bin
 
 # =============================================================================
-# 11. SERVİSLER
+# 13. SERVİSLER
 # =============================================================================
 info "Servisler etkinleştiriliyor..."
+
+# Kritik servisler — hata çıkarsa dur
 sudo systemctl enable --now acpid
 sudo systemctl enable --now power-profiles-daemon
 sudo systemctl enable --now tor
 sudo systemctl enable --now sshd
 sudo systemctl enable --now fstrim.timer
 sudo systemctl enable --now systemd-resolved.service
-sudo systemctl enable --now smartd              2>/dev/null || add_failed_service "smartd"
-sudo systemctl enable --now apparmor            2>/dev/null || add_failed_service "apparmor"
-sudo systemctl enable --now auditd              2>/dev/null || add_failed_service "auditd"
-sudo systemctl enable --now clamav-daemon       2>/dev/null || add_failed_service "clamav-daemon"
-sudo systemctl enable --now clamav-freshclam    2>/dev/null || add_failed_service "clamav-freshclam"
-sudo systemctl enable --now mullvad-daemon.service 2>/dev/null || add_failed_service "mullvad-daemon"
+sudo systemctl enable --now libvirtd
+
+# Opsiyonel servisler — hata çıkarsa kaydet, devam et
+{ sudo systemctl enable --now smartd;             } 2>/dev/null || add_failed_service "smartd"
+{ sudo systemctl enable --now apparmor;           } 2>/dev/null || add_failed_service "apparmor"
+{ sudo systemctl enable --now auditd;             } 2>/dev/null || add_failed_service "auditd"
+{ sudo systemctl enable --now clamav-daemon;      } 2>/dev/null || add_failed_service "clamav-daemon"
+{ sudo systemctl enable --now clamav-freshclam;   } 2>/dev/null || add_failed_service "clamav-freshclam"
+{ sudo systemctl enable --now mullvad-daemon;     } 2>/dev/null || add_failed_service "mullvad-daemon"
+{ sudo systemctl enable --now fail2ban;           } 2>/dev/null || add_failed_service "fail2ban"
 
 # =============================================================================
-# 12. FIREWALLD
+# 14. FAIL2BAN TEMEL YAPILANDIRMA (SSH koruması)
 # =============================================================================
-info "Firewalld kuruluyor ve ayarlanıyor..."
-sudo pacman -S --noconfirm firewalld
+info "Fail2ban SSH koruması yapılandırılıyor..."
+sudo tee /etc/fail2ban/jail.d/sshd.conf > /dev/null << 'EOF'
+[sshd]
+enabled  = true
+port     = ssh
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 5
+bantime  = 3600
+findtime = 600
+EOF
+success "Fail2ban SSH kuralı oluşturuldu."
+
+# =============================================================================
+# 15. RKHUNTER VERİTABANI GÜNCELLEMESİ
+# =============================================================================
+info "Rkhunter veritabanı güncelleniyor..."
+sudo rkhunter --update --nocolors 2>/dev/null || warning "rkhunter --update başarısız oldu (ağ sorunu olabilir)."
+sudo rkhunter --propupd --nocolors 2>/dev/null || warning "rkhunter --propupd başarısız oldu."
+success "Rkhunter veritabanı hazırlandı."
+
+# =============================================================================
+# 16. FIREWALLD
+# =============================================================================
+info "Firewalld ayarlanıyor..."
 sudo systemctl enable --now firewalld
 
 # KDE Connect (TCP+UDP 1714-1764)
 sudo firewall-cmd --permanent --add-service=kdeconnect
-
 # SSH
 sudo firewall-cmd --permanent --add-service=ssh
+# Mullvad VPN (WireGuard)
+sudo firewall-cmd --permanent --add-service=wireguard 2>/dev/null || true
 
 sudo firewall-cmd --reload
-success "Firewalld ayarlandı: KDE Connect ve SSH portları açıldı."
+success "Firewalld ayarlandı: KDE Connect, SSH ve WireGuard portları açıldı."
 
 # =============================================================================
-# 13. GRUP ÜYELİKLERİ
+# 17. GRUP ÜYELİKLERİ
 # =============================================================================
 info "Grup üyelikleri ayarlanıyor..."
-sudo usermod -aG video "$CURRENT_USER"
-sudo usermod -aG wireshark "$CURRENT_USER"
-sudo usermod -aG input "$CURRENT_USER"
+sudo usermod -aG video      "$CURRENT_USER"
+sudo usermod -aG wireshark  "$CURRENT_USER"
+sudo usermod -aG input      "$CURRENT_USER"
 success "Gruplar: video, wireshark, input eklendi."
 
 # =============================================================================
-# 14. /boot İZİNLERİ
+# 18. /boot İZİNLERİ
 # =============================================================================
 info "/boot izinleri düzeltiliyor..."
 sudo chmod 700 /boot
 success "/boot chmod 700 yapıldı."
 
 # =============================================================================
-# 14. ZSH & OH MY ZSH
+# 19. ZSH & OH MY ZSH
 # =============================================================================
 info "Oh My Zsh kuruluyor..."
 if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
@@ -263,23 +345,32 @@ info "Zsh pluginleri kuruluyor..."
 if [[ ! -d "$HOME/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting" ]]; then
     git clone https://github.com/zsh-users/zsh-syntax-highlighting.git \
         "$HOME/.oh-my-zsh/custom/plugins/zsh-syntax-highlighting"
+    success "zsh-syntax-highlighting kuruldu."
 fi
 
 if [[ ! -d "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]]; then
     git clone https://github.com/zsh-users/zsh-autosuggestions \
         "$HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions"
+    success "zsh-autosuggestions kuruldu."
 fi
 
 info "Tema ve zshrc kopyalanıyor..."
 cp "$SCRIPT_DIR/arch-linux.zsh-theme" "$HOME/.oh-my-zsh/themes/"
 cp "$SCRIPT_DIR/.zshrc" "$HOME/.zshrc"
+success "Zsh tema ve yapılandırma kopyalandı."
 
 info "Zsh default shell olarak ayarlanıyor..."
 chsh -s "$(which zsh)" "$CURRENT_USER"
 success "Default shell zsh olarak ayarlandı."
 
 # =============================================================================
-# 15. SNAPPER
+# 20. CLAMAV VERİTABANI GÜNCELLEMESİ
+# =============================================================================
+info "ClamAV veritabanı güncelleniyor..."
+sudo freshclam 2>/dev/null || warning "freshclam başarısız oldu, servis başladıktan sonra otomatik güncellenecek."
+
+# =============================================================================
+# 21. SNAPPER YAPILANDIRMASI
 # =============================================================================
 info "Snapper yapılandırılıyor..."
 if ! sudo snapper list-configs 2>/dev/null | grep -q "^root"; then
@@ -288,8 +379,14 @@ if ! sudo snapper list-configs 2>/dev/null | grep -q "^root"; then
 else
     warning "Snapper root config zaten mevcut."
 fi
+
+# Otomatik snapshot zamanlaması
+sudo systemctl enable --now snapper-timeline.timer
+sudo systemctl enable --now snapper-cleanup.timer
+success "Snapper timer'ları etkinleştirildi."
+
 sudo snapper -c root create -d "Post-install tamamlandı"
-success "Snapper snapshot alındı."
+success "İlk snapper snapshot alındı."
 
 # =============================================================================
 # ÖZET
@@ -298,17 +395,26 @@ echo ""
 echo -e "${GREEN}=============================================${NC}"
 echo -e "${GREEN}  Kurulum tamamlandı!${NC}"
 echo -e "${GREEN}=============================================${NC}"
+echo ""
 
 if [[ ${#FAILED_SERVICES[@]} -gt 0 ]]; then
-    echo -e "${YELLOW}Başlatılamayan servisler:${NC}"
+    echo -e "${YELLOW}Başlatılamayan servisler (reboot sonrası tekrar dene):${NC}"
     for svc in "${FAILED_SERVICES[@]}"; do
         echo -e "  ${RED}✗${NC} $svc"
     done
 else
-    echo -e "${GREEN}Tüm servisler başarıyla etkinleştirildi.${NC}"
+    echo -e "${GREEN}✓ Tüm servisler başarıyla etkinleştirildi.${NC}"
 fi
 
 echo ""
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}  ÖNEMLİ NOTLAR${NC}"
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${YELLOW}► Grup değişiklikleri için yeniden oturum aç.${NC}"
 echo -e "${YELLOW}► Nvidia ve kernel değişiklikleri için sistemi yeniden başlat.${NC}"
+echo -e "${YELLOW}► RTX 5060: SDDM geçici olarak X11 modunda. Siyah ekran çözülünce:${NC}"
+echo -e "    sudo rm /etc/sddm.conf.d/nvidia-wayland.conf${NC}"
 echo -e "${YELLOW}► Bir şey bozulursa: sudo downgrade nvidia-open nvidia-utils${NC}"
+echo -e "${YELLOW}► Lynis güvenlik taraması için: sudo lynis audit system${NC}"
+echo -e "${YELLOW}► Nvidia driver durumu için: nvidia-smi${NC}"
+echo ""
