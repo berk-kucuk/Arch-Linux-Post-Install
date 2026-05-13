@@ -110,6 +110,17 @@ source $ZSH/oh-my-zsh.sh
 # - $ZSH_CUSTOM/macos.zsh
 # For a full list of active aliases, run `alias`.
 #
+
+fastfetch \                                                                                                            [22:41:08]
+        --logo Arch \
+        --logo-color-1 "38;2;126;187;232" \
+        --logo-color-2 "38;2;80;137;194" \
+        --color-keys "38;2;126;187;232" \
+        --color-title "38;2;80;137;194" \
+        --separator " → " \
+        --key-width 25 \
+        --structure "Title:OS:Host:Kernel:Uptime:Packages:Shell:Terminal:Display:DE:WM:CPU:GPU:Memory:Swap:Disk:LocalIp"
+
 # Example aliases
 # alias zshconfig="mate ~/.zshrc"
 # alias ohmyzsh="mate ~/.oh-my-zsh"
