@@ -274,6 +274,7 @@ PACMAN_PACKAGES=(
     tor
     fail2ban
     lynis
+    fastfetch
     python-pip
     python-setuptools
     openvpn
