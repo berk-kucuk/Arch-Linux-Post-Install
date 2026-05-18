@@ -793,14 +793,44 @@ run "mkinitcpio yeniden oluşturuluyor" \
     sudo mkinitcpio -P
 
 # =============================================================================
-# 21. Son snapshot
+# 21. USB Uyandırma Devre Dışı Bırakma
+# XHC0, PTXH, PT20, PT29 — USB controller/port'ları suspend'den uyandırmasın
+# =============================================================================
+
+if sudo tee /etc/systemd/system/disable-usb-wake.service > /dev/null << 'EOF'
+[Unit]
+Description=Disable USB Wake on Suspend
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "echo XHC0 > /proc/acpi/wakeup"
+ExecStart=/bin/sh -c "echo PTXH > /proc/acpi/wakeup"
+ExecStart=/bin/sh -c "echo PT20 > /proc/acpi/wakeup"
+ExecStart=/bin/sh -c "echo PT29 > /proc/acpi/wakeup"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+then
+    success "disable-usb-wake.service yazıldı."
+else
+    error "disable-usb-wake.service yazılamadı."
+    ERRORS+=("disable-usb-wake.service")
+fi
+
+run "disable-usb-wake.service etkinleştiriliyor" \
+    sudo systemctl enable --now disable-usb-wake.service
+
+# =============================================================================
+# 22. Son snapshot
 # =============================================================================
 
 run "Son snapper snapshot oluşturuluyor" \
     sudo snapper -c root create -d "Post-install tamamlandı"
 
 # =============================================================================
-# 22. Sonuç
+# 23. Sonuç
 # =============================================================================
 
 echo ""
