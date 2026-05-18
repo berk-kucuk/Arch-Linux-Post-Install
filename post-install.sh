@@ -328,7 +328,6 @@ PACMAN_PACKAGES=(
     virt-manager
     filezilla
     koko
-    acpi_call
     smartmontools
     ethtool
     lm_sensors
