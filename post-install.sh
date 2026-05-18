@@ -160,10 +160,30 @@ if [[ -f "$LIMINE_CONF" ]]; then
     run "limine.conf yedekleniyor" \
         sudo cp "$LIMINE_CONF" "${LIMINE_CONF}.bak"
 
-    run "Limine çözünürlük ayarlanıyor" \
-        sudo sed -i \
-        's/^interface_resolution:.*/interface_resolution: 2560x1440/' \
-        "$LIMINE_CONF"
+    if grep -q "^interface_resolution:" "$LIMINE_CONF"; then
+        run "Limine çözünürlük güncelleniyor" \
+            sudo sed -i \
+            's/^interface_resolution:.*/interface_resolution: 2560x1440x32/' \
+            "$LIMINE_CONF"
+    else
+        run "Limine çözünürlük ekleniyor" \
+            sudo sed -i '1s|^|interface_resolution: 2560x1440x32\n|' "$LIMINE_CONF"
+    fi
+
+    if ! grep -q "^wallpaper:" "$LIMINE_CONF"; then
+        run "Limine wallpaper ayarı ekleniyor" \
+            sudo sed -i '1s|^|wallpaper: boot():/limine/wallpaper.png\n|' "$LIMINE_CONF"
+    else
+        warning "wallpaper zaten mevcut."
+    fi
+
+    if ! grep -q "^timeout:" "$LIMINE_CONF"; then
+        run "Limine timeout ekleniyor" \
+            sudo sed -i '1s|^|timeout: 5\n|' "$LIMINE_CONF"
+    else
+        run "Limine timeout güncelleniyor" \
+            sudo sed -i 's/^timeout:.*/timeout: 5/' "$LIMINE_CONF"
+    fi
 
     # NVIDIA parametreleri
     if ! grep -q "nvidia-drm.modeset=1" "$LIMINE_CONF"; then
