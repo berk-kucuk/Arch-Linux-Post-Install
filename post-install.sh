@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ---------- Renkli çıktı yardımcıları -----------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -84,11 +86,25 @@ keep_sudo_alive
 run "Sistem güncellemesi" \
     sudo pacman -Syu --noconfirm
 
-run "Firefox, Plasma, base-devel, git kurulumu" \
-    sudo pacman -S --noconfirm --needed firefox plasma-meta base-devel git
+run "Firefox, Plasma (tam), KDE uygulamaları, base-devel, git, linux-headers kurulumu" \
+    sudo pacman -S --noconfirm --needed firefox plasma-meta kde-applications-meta base-devel git linux-headers
 
 # =============================================================================
-# 2. NVIDIA ayarları
+# 2. Multilib repo (Steam ve 32-bit kütüphaneler için zorunlu)
+# =============================================================================
+
+if grep -q '^\[multilib\]' /etc/pacman.conf; then
+    warning "multilib repo zaten aktif."
+else
+    run "multilib repo aktifleştiriliyor" \
+        sudo sed -i '/^#\[multilib\]/,/^#Include = \/etc\/pacman.d\/mirrorlist/{s/^#//}' /etc/pacman.conf
+
+    run "pacman veritabanı güncelleniyor (multilib dahil)" \
+        sudo pacman -Sy --noconfirm
+fi
+
+# =============================================================================
+# 3. NVIDIA ayarları
 # =============================================================================
 
 info "NVIDIA modprobe.d ayarları yazılıyor..."
@@ -184,7 +200,7 @@ else
 fi
 
 # Wallpaper
-WALLPAPER="./wallpaper.png"
+WALLPAPER="${SCRIPT_DIR}/wallpaper.png"
 
 if [[ -f "$WALLPAPER" ]]; then
     run "Limine wallpaper kopyalanıyor" \
@@ -194,7 +210,7 @@ else
 fi
 
 # =============================================================================
-# 3. paru kurulumu
+# 4. paru kurulumu
 # =============================================================================
 
 if command -v paru &>/dev/null; then
@@ -202,6 +218,8 @@ if command -v paru &>/dev/null; then
 else
 
     PARU_DIR="${TARGET_HOME}/Downloads/paru"
+
+    mkdir -p "${TARGET_HOME}/Downloads"
 
     if [[ ! -d "$PARU_DIR" ]]; then
         run "paru repo klonlanıyor" \
@@ -217,7 +235,7 @@ else
 fi
 
 # =============================================================================
-# 4. AUR paketleri
+# 5. AUR paketleri
 # =============================================================================
 
 AUR_PACKAGES=(
@@ -239,6 +257,8 @@ AUR_PACKAGES=(
     # FIX #5 — winboat-bin AUR'da mevcut değil, kaldırıldı
     # Plymouth teması
     plymouth-theme-arch-logo-symbol
+    noise-suppression-for-voice
+    vmware-workstation
 )
 
 for pkg in "${AUR_PACKAGES[@]}"; do
@@ -247,7 +267,7 @@ for pkg in "${AUR_PACKAGES[@]}"; do
 done
 
 # =============================================================================
-# 5. Resmi repo paketleri
+# 6. Resmi repo paketleri
 # =============================================================================
 
 PACMAN_PACKAGES=(
@@ -282,7 +302,6 @@ PACMAN_PACKAGES=(
     ttf-nerd-fonts-symbols
     network-manager-applet
     wireguard-tools
-    systemd-resolvconf
     aircrack-ng
     unzip
     unrar
@@ -298,7 +317,6 @@ PACMAN_PACKAGES=(
     acpid
     btrfs-assistant
     zsh
-    noise-suppression-for-voice
     apparmor
     audit
     rkhunter
@@ -316,20 +334,21 @@ PACMAN_PACKAGES=(
     snapper
     firewalld
     plymouth
+    openssh
 )
 
 run "Resmi repo paketleri kuruluyor" \
     sudo pacman -S --noconfirm --needed "${PACMAN_PACKAGES[@]}"
 
 # =============================================================================
-# 6. Plymouth yapılandırması
+# 7. Plymouth yapılandırması
 # =============================================================================
 
 run "Plymouth varsayılan teması ayarlanıyor (arch-logo-symbol)" \
     sudo plymouth-set-default-theme -R arch-logo-symbol
 
 # =============================================================================
-# 7. Flatpak
+# 8. Flatpak
 # =============================================================================
 
 run "Flathub ekleniyor" \
@@ -337,7 +356,7 @@ run "Flathub ekleniyor" \
     flathub https://flathub.org/repo/flathub.flatpakrepo
 
 # =============================================================================
-# 8. Reflector
+# 9. Reflector
 # =============================================================================
 
 if sudo tee /etc/xdg/reflector/reflector.conf > /dev/null << 'EOF'
@@ -358,7 +377,7 @@ run "reflector.timer etkinleştiriliyor" \
     sudo systemctl enable --now reflector.timer
 
 # =============================================================================
-# 9. SSH hardening
+# 10. SSH hardening
 # FIX #8 — sshd enable ediliyordu ama hiçbir hardening yapılmıyordu
 # =============================================================================
 
@@ -378,7 +397,7 @@ else
 fi
 
 # =============================================================================
-# 10. Kullanıcı grupları
+# 11. Kullanıcı grupları
 # =============================================================================
 
 GROUPS_TO_ADD=(
@@ -395,7 +414,7 @@ for grp in "${GROUPS_TO_ADD[@]}"; do
 done
 
 # =============================================================================
-# 11. Servisler
+# 12. Servisler
 # =============================================================================
 
 SERVICES=(
@@ -410,13 +429,14 @@ SERVICES=(
     smartd
     apparmor
     auditd
-    # FIX #7 — clamav-freshclam servisi zaten güncellemeyi yönetir,
-    #           manual freshclam (adım 14 eski) kaldırıldı; çakışma önlendi
-    clamav-daemon
+    # clamav-freshclam önce başlamalı — daemon imza DB olmadan çalışmaz
     clamav-freshclam
+    clamav-daemon
     fail2ban
     firewalld
-    plymouth-start
+    vmware-networks
+    vmware-usbarbitrator
+    # plymouth-start boot servisi, mkinitcpio hook'u ile yönetilir; burada enable gerekmez
 )
 
 for svc in "${SERVICES[@]}"; do
@@ -425,7 +445,7 @@ for svc in "${SERVICES[@]}"; do
 done
 
 # =============================================================================
-# 12. fail2ban
+# 13. fail2ban
 # FIX #1 — Arch'ta /var/log/auth.log yok; systemd journal backend kullanılıyor
 # =============================================================================
 
@@ -451,7 +471,7 @@ run "fail2ban yeniden başlatılıyor" \
     sudo systemctl restart fail2ban
 
 # =============================================================================
-# 13. rkhunter
+# 14. rkhunter
 # =============================================================================
 
 run "rkhunter update" \
@@ -461,7 +481,7 @@ run "rkhunter property update" \
     sudo rkhunter --propupd --nocolors
 
 # =============================================================================
-# 14. firewalld
+# 15. firewalld
 # =============================================================================
 
 run "kdeconnect firewall kuralı" \
@@ -480,15 +500,13 @@ run "firewalld reload" \
     sudo firewall-cmd --reload
 
 # =============================================================================
-# 15. Oh My Zsh
+# 16. Oh My Zsh
 # =============================================================================
 
 if [[ ! -d "${TARGET_HOME}/.oh-my-zsh" ]]; then
 
     run "Oh My Zsh kuruluyor" \
-        sh -c \
-        "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" \
-        "" --unattended
+        bash -c 'RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
 
 else
     warning "Oh My Zsh zaten kurulu."
@@ -510,22 +528,22 @@ if [[ ! -d "${ZSH_PLUGIN_DIR}/zsh-autosuggestions" ]]; then
         "${ZSH_PLUGIN_DIR}/zsh-autosuggestions"
 fi
 
-if [[ -f "./arch-linux.zsh-theme" ]]; then
+if [[ -f "${SCRIPT_DIR}/arch-linux.zsh-theme" ]]; then
     run "Tema kopyalanıyor" \
-        cp ./arch-linux.zsh-theme \
+        cp "${SCRIPT_DIR}/arch-linux.zsh-theme" \
         "${TARGET_HOME}/.oh-my-zsh/themes/"
 fi
 
-if [[ -f "./.zshrc" ]]; then
+if [[ -f "${SCRIPT_DIR}/zshrc" ]]; then
     run ".zshrc kopyalanıyor" \
-        cp ./.zshrc "${TARGET_HOME}/.zshrc"
+        cp "${SCRIPT_DIR}/zshrc" "${TARGET_HOME}/.zshrc"
 fi
 
 run "Varsayılan shell zsh yapılıyor" \
     sudo chsh -s "$(which zsh)" "$TARGET_USER"
 
 # =============================================================================
-# 16. Snapper
+# 17. Snapper
 # =============================================================================
 
 if ! sudo snapper list-configs 2>/dev/null | grep -q "^root"; then
@@ -553,11 +571,11 @@ run "snapper cleanup timer" \
     sudo systemctl enable --now snapper-cleanup.timer
 
 # =============================================================================
-# 17. Claude CLI
+# 18. Claude CLI
 # =============================================================================
 
 run "Claude CLI kuruluyor" \
-    bash -c "$(curl -fsSL https://claude.ai/install.sh)"
+    bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
 
 ZSHRC="${TARGET_HOME}/.zshrc"
 
@@ -567,7 +585,7 @@ if [[ -f "$ZSHRC" ]] && ! grep -q 'HOME/.local/bin' "$ZSHRC"; then
 fi
 
 # =============================================================================
-# 18. mkinitcpio
+# 19. mkinitcpio
 # (Plymouth teması -R flag'i ile zaten mkinitcpio'yu tetikler,
 #  burada tekrar çalıştırarak son haliyle rebuild ediliyor)
 # =============================================================================
@@ -576,14 +594,14 @@ run "mkinitcpio yeniden oluşturuluyor" \
     sudo mkinitcpio -P
 
 # =============================================================================
-# 19. Son snapshot
+# 20. Son snapshot
 # =============================================================================
 
 run "Son snapper snapshot oluşturuluyor" \
     sudo snapper -c root create -d "Post-install tamamlandı"
 
 # =============================================================================
-# 20. Sonuç
+# 21. Sonuç
 # =============================================================================
 
 echo ""

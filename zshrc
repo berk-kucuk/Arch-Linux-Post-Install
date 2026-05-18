@@ -111,7 +111,7 @@ source $ZSH/oh-my-zsh.sh
 # For a full list of active aliases, run `alias`.
 #
 
-fastfetch \                                                                                                            [22:41:08]
+fastfetch \
         --logo Arch \
         --logo-color-1 "38;2;126;187;232" \
         --logo-color-2 "38;2;80;137;194" \
