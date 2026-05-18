@@ -335,6 +335,7 @@ PACMAN_PACKAGES=(
     firewalld
     plymouth
     openssh
+    macchanger
 )
 
 run "Resmi repo paketleri kuruluyor" \
@@ -500,7 +501,186 @@ run "firewalld reload" \
     sudo firewall-cmd --reload
 
 # =============================================================================
-# 16. Oh My Zsh
+# 16. MAC Randomizasyon
+# =============================================================================
+
+# NetworkManager yerleşik randomizasyonu — her bağlantıdan ÖNCE devreye girer
+run "NM conf.d dizini oluşturuluyor" \
+    sudo mkdir -p /etc/NetworkManager/conf.d
+
+if sudo tee /etc/NetworkManager/conf.d/mac-randomize.conf > /dev/null << 'EOF'
+[device]
+wifi.scan-rand-mac-address=yes
+
+[connection]
+wifi.cloned-mac-address=random
+ethernet.cloned-mac-address=random
+EOF
+then
+    success "NM mac-randomize.conf yazıldı."
+else
+    error "NM mac-randomize.conf yazılamadı."
+    ERRORS+=("NM mac-randomize.conf")
+fi
+
+run "MAC log dizini oluşturuluyor" \
+    sudo mkdir -p /var/log/mac-changer
+
+if sudo tee /usr/local/bin/mac_anonymizer.py > /dev/null << 'PYEOF'
+#!/usr/bin/env python3
+
+import subprocess
+import re
+import sys
+import time
+import datetime
+
+
+def log_message(message):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
+
+
+def get_network_interfaces():
+    try:
+        output = subprocess.check_output(["ip", "link"], text=True)
+        all_interfaces = re.findall(r'\d+: ([\w\d]+):', output)
+        physical = []
+        for iface in all_interfaces:
+            if iface.startswith(('lo', 'tun', 'tap', 'docker', 'br-', 'veth', 'virbr')):
+                continue
+            if iface.startswith(('wlan', 'wl', 'eth', 'en', 'em')):
+                physical.append(iface)
+        return physical
+    except subprocess.CalledProcessError as e:
+        log_message(f"ERROR: ip link komutu başarısız: {e}")
+        sys.exit(1)
+
+
+def get_current_mac(interface):
+    try:
+        output = subprocess.check_output(["ip", "link", "show", interface], text=True)
+        mac_match = re.search(r'ether ([a-f0-9:]{17})', output)
+        return mac_match.group(1) if mac_match else "Unknown"
+    except Exception:
+        return "Unknown"
+
+
+def change_mac(interface):
+    try:
+        old_mac = get_current_mac(interface)
+        log_message(f"INFO: İşlem yapılıyor: {interface} (Eski MAC: {old_mac})")
+
+        subprocess.run(["nmcli", "device", "disconnect", interface],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
+
+        subprocess.run(["ip", "link", "set", interface, "down"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["macchanger", "-r", interface],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "set", interface, "up"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        time.sleep(2)
+        subprocess.run(["nmcli", "device", "connect", interface],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+
+        new_mac = get_current_mac(interface)
+        log_message(f"INFO: {interface} MAC değiştirildi: {old_mac} -> {new_mac}")
+
+    except subprocess.CalledProcessError as e:
+        log_message(f"ERROR: {interface} için MAC değiştirilemedi: {e}")
+
+
+def main():
+    log_message("MAC anonymizer başlatıldı")
+    interfaces = get_network_interfaces()
+    if not interfaces:
+        log_message("WARN: Hiçbir fiziksel network arayüzü bulunamadı")
+        sys.exit(0)
+    log_message(f"INFO: Bulunan fiziksel interface'ler: {', '.join(interfaces)}")
+    for iface in interfaces:
+        change_mac(iface)
+    log_message("MAC anonymizer tamamlandı")
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+then
+    success "mac_anonymizer.py yazıldı."
+    run "mac_anonymizer.py çalıştırma izni" \
+        sudo chmod +x /usr/local/bin/mac_anonymizer.py
+else
+    error "mac_anonymizer.py yazılamadı."
+    ERRORS+=("mac_anonymizer.py")
+fi
+
+if sudo tee /etc/systemd/system/mac-changer.service > /dev/null << 'EOF'
+[Unit]
+Description=MAC Address Randomizer (manuel kullanım)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mac_anonymizer.py
+User=root
+StandardOutput=append:/var/log/mac-changer/mac-changer.log
+StandardError=append:/var/log/mac-changer/mac-changer.log
+EOF
+then
+    success "mac-changer.service yazıldı."
+else
+    error "mac-changer.service yazılamadı."
+    ERRORS+=("mac-changer.service")
+fi
+
+if sudo tee /usr/local/bin/change-mac-now > /dev/null << 'EOF'
+#!/bin/bash
+echo "Manuel MAC değiştirme başlatılıyor..."
+sudo /usr/local/bin/mac_anonymizer.py
+echo ""
+echo "Mevcut MAC adresleri:"
+for iface in $(ip -o link | awk -F': ' '{print $2}' | grep -E '^(wlan|wl|eth|en|em)' | grep -vE '^(docker|br-|veth|virbr)'); do
+    mac=$(ip link show "$iface" | awk '/ether/{print $2}')
+    [[ -n "$mac" ]] && echo "  $iface: $mac"
+done
+EOF
+then
+    sudo chmod +x /usr/local/bin/change-mac-now
+    success "change-mac-now yazıldı."
+else
+    error "change-mac-now yazılamadı."
+    ERRORS+=("change-mac-now")
+fi
+
+if sudo tee /usr/local/bin/mac-changer-logs > /dev/null << 'EOF'
+#!/bin/bash
+echo "=== MAC Changer Logları ==="
+if [[ -f /var/log/mac-changer/mac-changer.log ]]; then
+    tail -50 /var/log/mac-changer/mac-changer.log
+else
+    echo "Henüz log dosyası oluşmamış."
+fi
+EOF
+then
+    sudo chmod +x /usr/local/bin/mac-changer-logs
+    success "mac-changer-logs yazıldı."
+else
+    error "mac-changer-logs yazılamadı."
+    ERRORS+=("mac-changer-logs")
+fi
+
+run "systemd daemon-reload (mac-changer)" \
+    sudo systemctl daemon-reload
+
+run "NetworkManager yeniden başlatılıyor (MAC randomizasyon devreye alınıyor)" \
+    sudo systemctl restart NetworkManager
+
+# =============================================================================
+# 17. Oh My Zsh
 # =============================================================================
 
 if [[ ! -d "${TARGET_HOME}/.oh-my-zsh" ]]; then
@@ -543,7 +723,7 @@ run "Varsayılan shell zsh yapılıyor" \
     sudo chsh -s "$(which zsh)" "$TARGET_USER"
 
 # =============================================================================
-# 17. Snapper
+# 18. Snapper
 # =============================================================================
 
 if ! sudo snapper list-configs 2>/dev/null | grep -q "^root"; then
@@ -571,7 +751,7 @@ run "snapper cleanup timer" \
     sudo systemctl enable --now snapper-cleanup.timer
 
 # =============================================================================
-# 18. Claude CLI
+# 19. Claude CLI
 # =============================================================================
 
 run "Claude CLI kuruluyor" \
@@ -585,7 +765,7 @@ if [[ -f "$ZSHRC" ]] && ! grep -q 'HOME/.local/bin' "$ZSHRC"; then
 fi
 
 # =============================================================================
-# 19. mkinitcpio
+# 20. mkinitcpio
 # (Plymouth teması -R flag'i ile zaten mkinitcpio'yu tetikler,
 #  burada tekrar çalıştırarak son haliyle rebuild ediliyor)
 # =============================================================================
@@ -594,14 +774,14 @@ run "mkinitcpio yeniden oluşturuluyor" \
     sudo mkinitcpio -P
 
 # =============================================================================
-# 20. Son snapshot
+# 21. Son snapshot
 # =============================================================================
 
 run "Son snapper snapshot oluşturuluyor" \
     sudo snapper -c root create -d "Post-install tamamlandı"
 
 # =============================================================================
-# 21. Sonuç
+# 22. Sonuç
 # =============================================================================
 
 echo ""
