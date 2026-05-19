@@ -86,8 +86,8 @@ keep_sudo_alive
 run "Sistem güncellemesi" \
     sudo pacman -Syu --noconfirm
 
-run "Firefox, Plasma (tam), KDE uygulamaları, base-devel, git, linux-headers kurulumu" \
-    sudo pacman -S --noconfirm --needed firefox plasma-meta kde-applications-meta base-devel git linux-headers
+run "Firefox, Plasma (tam), base-devel, git, linux-headers kurulumu" \
+    sudo pacman -S --noconfirm --needed firefox plasma-meta base-devel git linux-headers
 
 # =============================================================================
 # 2. Multilib repo (Steam ve 32-bit kütüphaneler için zorunlu)
@@ -107,20 +107,30 @@ fi
 # 3. NVIDIA ayarları
 # =============================================================================
 
-info "NVIDIA modprobe.d ayarları yazılıyor..."
+if pacman -Qq nvidia nvidia-dkms nvidia-lts 2>/dev/null | grep -q .; then
+    NVIDIA_PROPRIETARY=true
+    info "NVIDIA proprietary driver tespit edildi."
+else
+    NVIDIA_PROPRIETARY=false
+    warning "NVIDIA proprietary driver kurulu değil — modprobe/kernel parametre adımları atlanıyor."
+fi
 
-if sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
+if $NVIDIA_PROPRIETARY; then
+    info "NVIDIA modprobe.d ayarları yazılıyor..."
+
+    if sudo tee /etc/modprobe.d/nvidia.conf > /dev/null << 'EOF'
 options nvidia_drm modeset=1 fbdev=1
 options nvidia NVreg_EnableGpuFirmware=1
 
 blacklist nouveau
 options nouveau modeset=0
 EOF
-then
-    success "nvidia.conf yazıldı."
-else
-    error "nvidia.conf yazılamadı!"
-    ERRORS+=("nvidia.conf")
+    then
+        success "nvidia.conf yazıldı."
+    else
+        error "nvidia.conf yazılamadı!"
+        ERRORS+=("nvidia.conf")
+    fi
 fi
 
 # mkinitcpio
@@ -138,14 +148,16 @@ if [[ -f "$MKINIT" ]]; then
         warning "plymouth hook zaten mevcut."
     fi
 
-    # FIX #6 — MODULES tamamen üzerine yazmak yerine nvidia modülleri ekleniyor
-    if ! grep -q 'nvidia' "$MKINIT"; then
-        run "mkinitcpio MODULES güncelleniyor (nvidia ekleniyor)" \
-            sudo sed -i \
-            's/^MODULES=(\(.*\))/MODULES=(\1 nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' \
-            "$MKINIT"
-    else
-        warning "MODULES içinde nvidia modülleri zaten mevcut."
+    # MODULES — nvidia modülleri yalnızca NVIDIA GPU varsa ekleniyor
+    if $NVIDIA_PROPRIETARY; then
+        if ! grep -q 'nvidia' "$MKINIT"; then
+            run "mkinitcpio MODULES güncelleniyor (nvidia ekleniyor)" \
+                sudo sed -i \
+                's/^MODULES=(\(.*\))/MODULES=(\1 nvidia nvidia_modeset nvidia_uvm nvidia_drm)/' \
+                "$MKINIT"
+        else
+            warning "MODULES içinde nvidia modülleri zaten mevcut."
+        fi
     fi
 
 else
@@ -185,14 +197,16 @@ if [[ -f "$LIMINE_CONF" ]]; then
             sudo sed -i 's/^timeout:.*/timeout: 5/' "$LIMINE_CONF"
     fi
 
-    # NVIDIA parametreleri
-    if ! grep -q "nvidia-drm.modeset=1" "$LIMINE_CONF"; then
-        run "Limine NVIDIA parametreleri ekleniyor" \
-            sudo sed -i \
-            '/^ *cmdline:/ s/$/ nvidia-drm.modeset=1 nvidia-drm.fbdev=1/' \
-            "$LIMINE_CONF"
-    else
-        warning "NVIDIA parametreleri zaten mevcut."
+    # NVIDIA parametreleri — yalnızca NVIDIA GPU varsa ekleniyor
+    if $NVIDIA_PROPRIETARY; then
+        if ! grep -q "nvidia-drm.modeset=1" "$LIMINE_CONF"; then
+            run "Limine NVIDIA parametreleri ekleniyor" \
+                sudo sed -i \
+                '/^ *cmdline:/ s/$/ nvidia-drm.modeset=1 nvidia-drm.fbdev=1/' \
+                "$LIMINE_CONF"
+        else
+            warning "NVIDIA parametreleri zaten mevcut."
+        fi
     fi
 
     # FIX #3 — AppArmor kernel parametresi ekleniyor
@@ -797,7 +811,10 @@ run "mkinitcpio yeniden oluşturuluyor" \
 # XHC0, PTXH, PT20, PT29 — USB controller/port'ları suspend'den uyandırmasın
 # =============================================================================
 
-if sudo tee /etc/systemd/system/disable-usb-wake.service > /dev/null << 'EOF'
+read -rp "USB wake-up devre dışı bırakılsın mı? (sadece belirli cihazlarda gerekli) [e/H]: " _usb_wake_ans
+if [[ "${_usb_wake_ans,,}" == "e" ]]; then
+
+    if sudo tee /etc/systemd/system/disable-usb-wake.service > /dev/null << 'EOF'
 [Unit]
 Description=Disable USB Wake on Suspend
 After=multi-user.target
@@ -812,15 +829,19 @@ ExecStart=/bin/sh -c "echo PT29 > /proc/acpi/wakeup"
 [Install]
 WantedBy=multi-user.target
 EOF
-then
-    success "disable-usb-wake.service yazıldı."
-else
-    error "disable-usb-wake.service yazılamadı."
-    ERRORS+=("disable-usb-wake.service")
-fi
+    then
+        success "disable-usb-wake.service yazıldı."
+    else
+        error "disable-usb-wake.service yazılamadı."
+        ERRORS+=("disable-usb-wake.service")
+    fi
 
-run "disable-usb-wake.service etkinleştiriliyor" \
-    sudo systemctl enable --now disable-usb-wake.service
+    run "disable-usb-wake.service etkinleştiriliyor" \
+        sudo systemctl enable --now disable-usb-wake.service
+
+else
+    warning "USB wake-up adımı atlandı."
+fi
 
 # =============================================================================
 # 22. Son snapshot
