@@ -417,7 +417,7 @@ run "reflector.timer etkinleştiriliyor" \
 
 if sudo tee /etc/ssh/sshd_config.d/hardening.conf > /dev/null << 'EOF'
 PermitRootLogin no
-PasswordAuthentication no
+PasswordAuthentication yes
 X11Forwarding no
 MaxAuthTries 3
 AllowAgentForwarding no
